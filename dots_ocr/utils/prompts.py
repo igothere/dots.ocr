@@ -1,4 +1,5 @@
 dict_promptmode_to_prompt = {
+    # 5. Final Output: The entire output must be a single JSON object.
     # prompt_layout_all_en: parse all layout info in json format.
     "prompt_layout_all_en": """Please output the layout information from the PDF image, including each layout element's bbox, its category, and the corresponding text content within the bbox.
 
@@ -9,14 +10,20 @@ dict_promptmode_to_prompt = {
 3. Text Extraction & Formatting Rules:
     - Picture: For the 'Picture' category, the text field should be omitted.
     - Formula: Format its text as LaTeX.
-    - Table: Format its text as HTML.
+    - Table: Format its text as valid HTML only.
+      Required tags: <table>, <thead>, <tbody>, <tr>, <th>, <td>.
+      Preserve merged cells with correct rowspan/colspan values.
+      Never output Markdown table syntax for Table category.
     - All Others (Text, Title, etc.): Format their text as Markdown.
 
 4. Constraints:
     - The output text must be the original text from the image, with no translation.
     - All layout elements must be sorted according to human reading order.
 
-5. Final Output: The entire output must be a single JSON object.
+5. Final Output (STRICT):
+    - Return a JSON array only.
+    - Each item should be an object with keys: "bbox", "category", and optional "text".
+    - Do not include markdown wrappers, code fences, comments, or explanations.
 """,
 
     # prompt_layout_only_en: layout detection

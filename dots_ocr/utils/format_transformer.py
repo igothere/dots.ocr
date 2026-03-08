@@ -142,6 +142,52 @@ def clean_text(text: str) -> str:
     return text
 
 
+def normalize_table_html(table_html: str) -> str:
+    """
+    Best-effort table HTML cleanup to preserve rowspan/colspan rendering.
+    """
+    if not isinstance(table_html, str):
+        return ""
+
+    text = table_html.strip()
+    if not text:
+        return ""
+
+    # Strip optional markdown code fences.
+    text = re.sub(r"^```(?:html)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+
+    # Keep only the likely table region.
+    table_start = text.find("<table")
+    if table_start != -1:
+        text = text[table_start:]
+
+    # Drop tail after the last complete table close.
+    last_close = text.rfind("</table>")
+    if last_close != -1:
+        text = text[:last_close + len("</table>")]
+    else:
+        # If table close is missing, trim dangling partial tag and append close.
+        last_gt = text.rfind(">")
+        if last_gt != -1:
+            text = text[:last_gt + 1]
+        if "<table" in text:
+            text += "</table>"
+
+    # Make basic HTML table syntax more renderer-friendly.
+    text = text.replace("<br>", "<br/>")
+    text = re.sub(r"\s+(rowspan|colspan)\s*=\s*\"?(\d+)\"?", r' \1="\2"', text, flags=re.IGNORECASE)
+
+    # Close partially open common tags if counts mismatch.
+    for tag in ("thead", "tbody", "tr", "th", "td"):
+        open_n = len(re.findall(rf"<{tag}\b", text, flags=re.IGNORECASE))
+        close_n = len(re.findall(rf"</{tag}>", text, flags=re.IGNORECASE))
+        if open_n > close_n:
+            text += f"</{tag}>" * (open_n - close_n)
+
+    return text.strip()
+
+
 def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_page_hf: bool = False) -> str:
     """
     Converts a layout JSON format to Markdown.
@@ -170,6 +216,8 @@ def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_pa
             image_crop = image.crop((x1, y1, x2, y2))
             image_base64 = PILimage_to_base64(image_crop)
             text_items.append(f"![]({image_base64})")
+        elif cell['category'] == 'Table':
+            text_items.append(normalize_table_html(text))
         elif cell['category'] == 'Formula':
             text_items.append(get_formula_in_markdown(text))
         else:            

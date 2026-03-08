@@ -205,16 +205,42 @@ def post_process_output(response, prompt_mode, origin_image, input_image, min_pi
 
     json_load_failed = False
     cells = response
+
+    def _extract_json_span(text):
+        if not isinstance(text, str):
+            return text
+        s = text.strip()
+        l = s.find("[")
+        r = s.rfind("]")
+        if l != -1 and r != -1 and r > l:
+            return s[l:r + 1]
+        l = s.find("{")
+        r = s.rfind("}")
+        if l != -1 and r != -1 and r > l:
+            return s[l:r + 1]
+        return s
+
+    def _try_parse_cells(text):
+        obj = json.loads(text)
+        # Some outputs are JSON-string-encoded JSON: "\"[...]\""
+        if isinstance(obj, str):
+            obj = json.loads(obj)
+        if isinstance(obj, dict):
+            obj = [obj]
+        if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], dict) and "bbox" in obj[0]:
+            return post_process_cells(
+                origin_image,
+                obj,
+                input_image.width,
+                input_image.height,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels
+            )
+        raise ValueError("parsed object is not a valid list of layout cells")
+
     try:
-        cells = json.loads(cells)
-        cells = post_process_cells(
-            origin_image, 
-            cells,
-            input_image.width,
-            input_image.height,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels
-        )
+        candidate = _extract_json_span(cells)
+        cells = _try_parse_cells(candidate)
         return cells, False
     except Exception as e:
         print(f"cells post process error: {e}, when using {prompt_mode}")
@@ -225,4 +251,7 @@ def post_process_output(response, prompt_mode, origin_image, input_image, min_pi
         response_clean = cleaner.clean_model_output(cells)
         if isinstance(response_clean, list):
             response_clean = "\n\n".join([cell['text'] for cell in response_clean if 'text' in cell])
+        if not isinstance(response_clean, str) or not response_clean.strip():
+            # Fallback: keep raw model text so md is not empty.
+            response_clean = str(response).strip()
         return response_clean, True

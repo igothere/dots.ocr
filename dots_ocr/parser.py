@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from tqdm import tqdm
 from multiprocessing.pool import ThreadPool, Pool
 import argparse
@@ -33,6 +34,11 @@ class DotsOCRParser:
             min_pixels=None,
             max_pixels=None,
             use_hf=False,
+            save_crop_images=False,
+            crop_categories="Table",
+            crop_pad=0,
+            include_section_header_in_table_crop=False,
+            section_header_max_gap=220,
         ):
         self.dpi = dpi
 
@@ -49,6 +55,13 @@ class DotsOCRParser:
         self.output_dir = output_dir
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
+        self.save_crop_images = save_crop_images
+        self.crop_categories = {
+            x.strip() for x in str(crop_categories).split(",") if x.strip()
+        }
+        self.crop_pad = max(0, int(crop_pad))
+        self.include_section_header_in_table_crop = include_section_header_in_table_crop
+        self.section_header_max_gap = max(0, int(section_header_max_gap))
 
         self.use_hf = use_hf
         if self.use_hf:
@@ -64,7 +77,7 @@ class DotsOCRParser:
         from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
         from qwen_vl_utils import process_vision_info
 
-        model_path = "./weights/DotsOCR"
+        model_path = "./weights/DotsOCR_1_5"
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
             attn_implementation="flash_attention_2",
@@ -75,7 +88,32 @@ class DotsOCRParser:
         self.processor = AutoProcessor.from_pretrained(model_path,  trust_remote_code=True,use_fast=True)
         self.process_vision_info = process_vision_info
 
-    def _inference_with_hf(self, image, prompt):
+    def _hf_generation_config(self, prompt_mode):
+        max_new_tokens = self.max_completion_tokens
+        return {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": True,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "repetition_penalty": 1.08,
+            "no_repeat_ngram_size": 8,
+        }
+
+    @staticmethod
+    def _extract_json_span(text):
+        if not isinstance(text, str) or not text:
+            return text
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1]
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1]
+        return text
+
+    def _inference_with_hf(self, image, prompt, prompt_mode):
         messages = [
             {
                 "role": "user",
@@ -106,17 +144,20 @@ class DotsOCRParser:
 
         inputs = inputs.to("cuda")
 
-        # Inference: Generation of the output
-        generated_ids = self.model.generate(**inputs, max_new_tokens=24000)
+        generation_cfg = self._hf_generation_config(prompt_mode)
+        generated_ids = self.model.generate(**inputs, **generation_cfg)
         generated_ids_trimmed = [
             out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]
         response = self.processor.batch_decode(
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
+        if prompt_mode in ["prompt_layout_all_en", "prompt_layout_only_en", "prompt_web_parsing", "prompt_grounding_ocr"]:
+            response = self._extract_json_span(response)
         return response
 
-    def _inference_with_vllm(self, image, prompt):
+    def _inference_with_vllm(self, image, prompt, prompt_mode):
+        max_completion_tokens = self.max_completion_tokens
         response = inference_with_vllm(
             image,
             prompt, 
@@ -126,7 +167,7 @@ class DotsOCRParser:
             port=self.port,
             temperature=self.temperature,
             top_p=self.top_p,
-            max_completion_tokens=self.max_completion_tokens,
+            max_completion_tokens=max_completion_tokens,
         )
         return response
 
@@ -138,6 +179,93 @@ class DotsOCRParser:
             bbox = pre_process_bboxes(origin_image, bboxes, input_width=image.width, input_height=image.height, min_pixels=min_pixels, max_pixels=max_pixels)[0]
             prompt = prompt + str(bbox)
         return prompt
+
+    def _crop_with_padding(self, image, bbox, pad=0):
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        w, h = image.size
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(w, x2 + pad)
+        y2 = min(h, y2 + pad)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return image.crop((x1, y1, x2, y2))
+
+    @staticmethod
+    def _bbox_horizontal_overlap(b1, b2):
+        left = max(int(b1[0]), int(b2[0]))
+        right = min(int(b1[2]), int(b2[2]))
+        return max(0, right - left)
+
+    def _merge_table_with_nearest_section_header(self, table_bbox, section_headers):
+        tx1, ty1, tx2, ty2 = [int(v) for v in table_bbox]
+        best = None
+        best_gap = None
+        for hb in section_headers:
+            hx1, hy1, hx2, hy2 = [int(v) for v in hb]
+            if hy2 > ty1:
+                continue
+            overlap = self._bbox_horizontal_overlap([tx1, ty1, tx2, ty2], [hx1, hy1, hx2, hy2])
+            if overlap <= 0:
+                continue
+            gap = ty1 - hy2
+            if gap > self.section_header_max_gap:
+                continue
+            if best is None or gap < best_gap:
+                best = [hx1, hy1, hx2, hy2]
+                best_gap = gap
+
+        if best is None:
+            return [tx1, ty1, tx2, ty2]
+
+        hx1, hy1, hx2, hy2 = best
+        return [min(tx1, hx1), min(ty1, hy1), max(tx2, hx2), max(ty2, hy2)]
+
+    def _save_layout_crops(self, image, cells, save_dir, save_name):
+        if not self.save_crop_images:
+            return 0
+        if not isinstance(cells, list) or len(cells) == 0:
+            return 0
+
+        crops_dir = os.path.join(save_dir, f"{save_name}_crops")
+        os.makedirs(crops_dir, exist_ok=True)
+        saved = 0
+        section_headers = []
+        if self.include_section_header_in_table_crop:
+            section_headers = [
+                cell.get("bbox")
+                for cell in cells
+                if str(cell.get("category", "")) == "Section-header"
+                and isinstance(cell.get("bbox"), list)
+                and len(cell.get("bbox")) == 4
+            ]
+
+        for idx, cell in enumerate(cells):
+            category = str(cell.get("category", "Unknown"))
+            if self.crop_categories and category not in self.crop_categories:
+                continue
+            bbox = cell.get("bbox")
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            crop_bbox = bbox
+            if category == "Table" and self.include_section_header_in_table_crop and section_headers:
+                crop_bbox = self._merge_table_with_nearest_section_header(bbox, section_headers)
+            crop = self._crop_with_padding(image, crop_bbox, pad=self.crop_pad)
+            if crop is None:
+                continue
+
+            category_safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", category).strip("_") or "Unknown"
+            x1, y1, x2, y2 = [int(v) for v in crop_bbox]
+            if self.crop_pad > 0:
+                w, h = image.size
+                x1 = max(0, x1 - self.crop_pad)
+                y1 = max(0, y1 - self.crop_pad)
+                x2 = min(w, x2 + self.crop_pad)
+                y2 = min(h, y2 + self.crop_pad)
+            crop_name = f"{idx:04d}_{category_safe}_{x1}_{y1}_{x2}_{y2}.png"
+            crop.save(os.path.join(crops_dir, crop_name))
+            saved += 1
+        return saved
 
     # def post_process_results(self, response, prompt_mode, save_dir, save_name, origin_image, image, min_pixels, max_pixels)
     def _parse_single_image(
@@ -166,9 +294,9 @@ class DotsOCRParser:
         input_height, input_width = smart_resize(image.height, image.width)
         prompt = self.get_prompt(prompt_mode, bbox, origin_image, image, min_pixels=min_pixels, max_pixels=max_pixels)
         if self.use_hf:
-            response = self._inference_with_hf(image, prompt)
+            response = self._inference_with_hf(image, prompt, prompt_mode)
         else:
-            response = self._inference_with_vllm(image, prompt)
+            response = self._inference_with_vllm(image, prompt, prompt_mode)
         result = {'page_no': page_idx,
             "input_height": input_height,
             "input_width": input_width
@@ -222,6 +350,9 @@ class DotsOCRParser:
                     'layout_info_path': json_file_path,
                     'layout_image_path': image_layout_path,
                 })
+                saved_crops = self._save_layout_crops(origin_image, cells, save_dir, save_name)
+                if saved_crops > 0:
+                    result.update({'crop_count': saved_crops})
                 if prompt_mode != "prompt_layout_only_en":  # no text md when detection only
                     md_content = layoutjson2md(origin_image, cells, text_key='text')
                     md_content_no_hf = layoutjson2md(origin_image, cells, text_key='text', no_page_hf=True) # used for clean output or metric of omnidocbench、olmbench 
@@ -402,6 +533,26 @@ def main():
         "--use_hf", type=bool, default=False,
         help=""
     )
+    parser.add_argument(
+        "--save_crop_images", action="store_true",
+        help="Save cropped images for selected layout categories"
+    )
+    parser.add_argument(
+        "--crop_categories", type=str, default="Table",
+        help="Comma-separated categories for crop saving (default: Table)"
+    )
+    parser.add_argument(
+        "--crop_pad", type=int, default=0,
+        help="Extra padding(px) around saved crops"
+    )
+    parser.add_argument(
+        "--include_section_header_in_table_crop", action="store_true",
+        help="When saving Table crops, merge with the nearest upper Section-header bbox"
+    )
+    parser.add_argument(
+        "--section_header_max_gap", type=int, default=220,
+        help="Max vertical gap(px) between Section-header and Table to merge in crop"
+    )
     args = parser.parse_args()
 
     dots_ocr_parser = DotsOCRParser(
@@ -418,6 +569,11 @@ def main():
         min_pixels=args.min_pixels,
         max_pixels=args.max_pixels,
         use_hf=args.use_hf,
+        save_crop_images=args.save_crop_images,
+        crop_categories=args.crop_categories,
+        crop_pad=args.crop_pad,
+        include_section_header_in_table_crop=args.include_section_header_in_table_crop,
+        section_header_max_gap=args.section_header_max_gap,
     )
 
     fitz_preprocess = not args.no_fitz_preprocess
