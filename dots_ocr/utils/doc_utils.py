@@ -30,10 +30,14 @@ def fitz_doc_to_image(doc, target_dpi=200, origin_dpi=None) -> dict:
     from PIL import Image
     mat = fitz.Matrix(target_dpi / 72, target_dpi / 72)
     pm = doc.get_pixmap(matrix=mat, alpha=False)
+    
+    print(f"DEBUG: Target DPI={target_dpi}, Initial Image size: width={pm.width}, height={pm.height}")
 
-    if pm.width > 4500 or pm.height > 4500:
+    if pm.width > 6500 or pm.height > 6500:
+        print("DEBUG: Image size exceeds 4500px. Fallback to 72 DPI.")
         mat = fitz.Matrix(72 / 72, 72 / 72)  # use fitz default dpi
         pm = doc.get_pixmap(matrix=mat, alpha=False)
+        print(f"DEBUG: Adjusted Image size: width={pm.width}, height={pm.height}")
 
     image = Image.frombytes('RGB', (pm.width, pm.height), pm.samples)
     return image

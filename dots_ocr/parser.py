@@ -185,8 +185,9 @@ class DotsOCRParser:
         w, h = image.size
         x1 = max(0, x1 - pad)
         y1 = max(0, y1 - pad)
-        x2 = min(w, x2 + pad)
-        y2 = min(h, y2 + pad)
+        # 오른쪽, 아래쪽은 예측 bbox 타이트함을 보정하기 위해 여백 2배 적용
+        x2 = min(w, x2 + int(pad * 3))
+        y2 = min(h, y2 + int(pad * 3))
         if x2 <= x1 or y2 <= y1:
             return None
         return image.crop((x1, y1, x2, y2))
@@ -260,8 +261,8 @@ class DotsOCRParser:
                 w, h = image.size
                 x1 = max(0, x1 - self.crop_pad)
                 y1 = max(0, y1 - self.crop_pad)
-                x2 = min(w, x2 + self.crop_pad)
-                y2 = min(h, y2 + self.crop_pad)
+                x2 = min(w, x2 + int(self.crop_pad * 2))
+                y2 = min(h, y2 + int(self.crop_pad * 2))
             crop_name = f"{idx:04d}_{category_safe}_{x1}_{y1}_{x2}_{y2}.png"
             crop.save(os.path.join(crops_dir, crop_name))
             saved += 1
