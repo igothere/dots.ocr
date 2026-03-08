@@ -77,3 +77,52 @@ python3 dots_ocr/parser.py demo/test5.pdf \
 
 **[ 결과 저장 옵션 ]**
 * `--output ./output_vllm3`: 결과물(마크다운, JSON 메타데이터, 크롭 이미지 디렉토리 등)을 저장할 최상위 디렉토리(폴더) 위치입니다.
+
+---
+
+## 3. 크롭 이미지(Crops) 마크다운 병합 실행
+
+앞서 파서를 통해 텍스트를 추출하고 표(Table)나 기타 객체를 잘라냈다면(Crop), 추가적인 내부 스크립트를 통해 잘라낸 이미지를 각자 인식(OCR)하여 하나의 최종 마크다운 파일로 통합할 수 있습니다. 
+이 단계 역시 vLLM 서버가 실행 중인 상태에서 진행해야 합니다. 터미널에 아래 명령어를 실행하세요.
+
+```bash
+python tools/merge_crops_to_md.py ./crops \
+  --merged-md ./output/merged.md \
+  --tmp-output-dir ./output_crop_ocr \
+  --prompt-mode prompt_layout_all_en \
+  --table-preprocess upscale_contrast \
+  --enhance-lines \
+  --stage2-max-completion-tokens 4096 \
+  --protocol http \
+  --ip 127.0.0.1 \
+  --port 8000 \
+  --model-name model \
+  --temperature 0.0 \
+  --top-p 1.0 \
+  --max-completion-tokens 4096
+```
+
+### 🔹 병합(Merge) 옵션 상세 설명
+
+**[ 경로 및 파일 설정 ]**
+* `./crops`: 앞선 단계에서 `--save_crop_images` 옵션을 통해 저장된 크롭 이미지들이 모여 있는 디렉토리 경로를 적습니다.
+* `--merged-md ./output/merged.md`: 크롭 이미지들의 개별 인식 결과물까지 모두 반영된, 최종 병합 마크다운(Markdown) 파일이 저장될 경로입니다.
+* `--tmp-output-dir ./output_crop_ocr`: 크롭 이미지 각각의 텍스트 변환 과정 등 중간(임시) 결과물들이 저장될 디렉토리입니다.
+
+**[ 서버 연결 설정 ]**
+* `--protocol http`: API 요청에 사용할 통신 프로토콜을 지정합니다. (기본적으로 `http`를 사용)
+* `--ip 127.0.0.1` / `--port 8000`: 요청을 받아줄 vLLM 서버의 로컬 IP 주소와 통신 포트 번호입니다.
+* `--model-name model`: 요청에 사용할 모델의 식별자입니다. vLLM 서버의 `--served-model-name`과 맞춰야 합니다.
+
+**[ 추론 속성 설정 ]**
+* `--prompt-mode prompt_layout_all_en`: 크롭 이미지를 어떤 프롬프트 모드로 파싱할지 지정합니다. 병합셀 보존이 중요하면 `prompt_layout_all_en`을 권장합니다(`prompt_ocr`는 구조 정보가 약함).
+* `--table-preprocess`: 2단계 재추론 전에 크롭 이미지를 보정합니다. (`none`, `upscale`, `contrast`, `binarize`, `upscale_contrast`)
+* `--enhance-lines`: 표 선을 약하게 강조해 2단계 재추론 정확도를 높입니다.
+* `--stage2-max-completion-tokens`: 2단계(테이블 전용 강제 프롬프트) 최대 출력 토큰입니다.
+* `--temperature 0.0`: 무작위성을 제어합니다. 정확하게 문서 내용을 추출해야 하므로 일관된 결과를 얻으려면 `0.0`을 유지합니다.
+* `--top-p 1.0`: 다음 단어 선택 시 확률 분포 컷오프(1.0은 모든 단어 고려 대상).
+* `--max-completion-tokens 4096`: 크롭된 이미지를 글로 풀어낼 때 허용되는 최대 글 길이(토큰) 제한입니다.
+
+### 🔹 병합셀 보존 권장값
+* 크롭 생성 시: `--crop_categories Table --crop_pad 16~32`
+* PDF 렌더링 시: `--dpi 300` (작은 글자가 많으면 400까지)
