@@ -314,6 +314,13 @@ class DotsOCRParser:
                 max_pixels=max_pixels,
                 )
             if filtered and prompt_mode != 'prompt_layout_only_en':  # model output json failed, use filtered process
+                if isinstance(response, str):
+                    tail = response[-160:].replace("\n", "\\n")
+                    print(
+                        f"[parser] filtered=True page={page_idx} response_chars={len(response)} response_tail={tail}"
+                    )
+                else:
+                    print(f"[parser] filtered=True page={page_idx} response_type={type(response).__name__}")
                 json_file_path = os.path.join(save_dir, f"{save_name}.json")
                 with open(json_file_path, 'w', encoding="utf-8") as w:
                     json.dump(response, w, ensure_ascii=False)

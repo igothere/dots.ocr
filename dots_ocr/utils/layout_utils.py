@@ -238,6 +238,13 @@ def post_process_output(response, prompt_mode, origin_image, input_image, min_pi
             )
         raise ValueError("parsed object is not a valid list of layout cells")
 
+    # Try full payload first for JSON-string-encoded JSON, then fallback to span extraction.
+    try:
+        cells = _try_parse_cells(cells)
+        return cells, False
+    except Exception:
+        pass
+
     try:
         candidate = _extract_json_span(cells)
         cells = _try_parse_cells(candidate)
@@ -249,6 +256,24 @@ def post_process_output(response, prompt_mode, origin_image, input_image, min_pi
     if json_load_failed:
         cleaner = OutputCleaner()
         response_clean = cleaner.clean_model_output(cells)
+        if (
+            isinstance(response_clean, list)
+            and len(response_clean) > 0
+            and isinstance(response_clean[0], dict)
+            and "bbox" in response_clean[0]
+        ):
+            try:
+                cells_clean = post_process_cells(
+                    origin_image,
+                    response_clean,
+                    input_image.width,
+                    input_image.height,
+                    min_pixels=min_pixels,
+                    max_pixels=max_pixels
+                )
+                return cells_clean, False
+            except Exception as e:
+                print(f"cells clean post process error: {e}, when using {prompt_mode}")
         if isinstance(response_clean, list):
             response_clean = "\n\n".join([cell['text'] for cell in response_clean if 'text' in cell])
         if not isinstance(response_clean, str) or not response_clean.strip():

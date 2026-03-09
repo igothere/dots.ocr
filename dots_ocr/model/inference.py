@@ -41,9 +41,23 @@ def inference_with_vllm(
             max_completion_tokens=max_completion_tokens,
             temperature=temperature,
             top_p=top_p)
-        response = response.choices[0].message.content
-        return response
+        choice = response.choices[0]
+        content = choice.message.content or ""
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+        completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
+        total_tokens = getattr(usage, "total_tokens", None) if usage else None
+        print(
+            "[vllm] finish_reason={} prompt_tokens={} completion_tokens={} total_tokens={} output_chars={} requested_max_completion_tokens={}".format(
+                getattr(choice, "finish_reason", None),
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                len(content),
+                max_completion_tokens,
+            )
+        )
+        return content
     except requests.exceptions.RequestException as e:
         print(f"request error: {e}")
         return None
-
